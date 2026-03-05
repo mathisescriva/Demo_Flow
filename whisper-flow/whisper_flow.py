@@ -44,6 +44,172 @@ except:
 
 BACKEND_URL = "http://localhost:8000"
 SAMPLE_RATE = 16000
+SOUND_SAMPLE_RATE = 44100
+
+
+# ============== SOUND DESIGN ==============
+class SoundDesign:
+    """Sons minimalistes et élégants - style premium."""
+    
+    @staticmethod
+    def _play_sound(samples: np.ndarray, volume: float = 0.06):
+        """Joue un son de manière non-bloquante."""
+        def play():
+            try:
+                sd.play(samples * volume, samplerate=SOUND_SAMPLE_RATE)
+            except:
+                pass
+        threading.Thread(target=play, daemon=True).start()
+    
+    @classmethod
+    def start_recording(cls):
+        """Son de démarrage - simple tick aigu."""
+        duration = 0.025
+        t = np.linspace(0, duration, int(SOUND_SAMPLE_RATE * duration), False)
+        tone = np.sin(2 * np.pi * 600 * t)
+        envelope = np.exp(-t * 120)
+        sound = (tone * envelope).astype(np.float32)
+        cls._play_sound(sound, volume=0.05)
+    
+    @classmethod
+    def stop_recording(cls):
+        """Son de fin - tick doux."""
+        duration = 0.04
+        t = np.linspace(0, duration, int(SOUND_SAMPLE_RATE * duration), False)
+        # Simple tone bas
+        tone = np.sin(2 * np.pi * 330 * t)
+        envelope = np.exp(-t * 80)
+        sound = (tone * envelope).astype(np.float32)
+        cls._play_sound(sound, volume=0.06)
+    
+    @classmethod
+    def success(cls):
+        """Son de succès - note unique douce."""
+        duration = 0.12
+        t = np.linspace(0, duration, int(SOUND_SAMPLE_RATE * duration), False)
+        # Une seule note chaude
+        tone = np.sin(2 * np.pi * 440 * t)
+        # Légère harmonique
+        tone += np.sin(2 * np.pi * 880 * t) * 0.15
+        # Envelope douce
+        envelope = np.sin(np.pi * t / duration) ** 0.5
+        envelope *= np.exp(-t * 8)
+        sound = (tone * envelope).astype(np.float32)
+        cls._play_sound(sound, volume=0.07)
+    
+    @classmethod
+    def error(cls):
+        """Son d'erreur - souffle grave très court."""
+        duration = 0.08
+        t = np.linspace(0, duration, int(SOUND_SAMPLE_RATE * duration), False)
+        # Bruit filtré grave
+        noise = np.random.randn(len(t))
+        tone = np.sin(2 * np.pi * 150 * t)
+        sound = noise * 0.2 + tone * 0.8
+        envelope = np.exp(-t * 40)
+        sound = (sound * envelope).astype(np.float32)
+        cls._play_sound(sound, volume=0.05)
+    
+    @classmethod
+    def command(cls):
+        """Son de commande exécutée - double tick rapide."""
+        duration = 0.03
+        t = np.linspace(0, duration, int(SOUND_SAMPLE_RATE * duration), False)
+        tone = np.sin(2 * np.pi * 800 * t)
+        envelope = np.exp(-t * 100)
+        sound = (tone * envelope).astype(np.float32)
+        cls._play_sound(sound, volume=0.05)
+
+
+# ============== COMMANDES VOCALES & SNIPPETS ==============
+class VoiceCommands:
+    """Gère les commandes vocales et les snippets."""
+    
+    # Snippets par défaut (personnalisables dans ~/.lexia-stream/snippets.json)
+    DEFAULT_SNIPPETS = {
+        "ma signature": "Cordialement,\nMathis",
+        "mon mail": "mathis@example.com",
+        "mon tel": "+33 6 00 00 00 00",
+        "mon adresse": "123 Rue Example, 75001 Paris",
+        "cordialement": "Cordialement,",
+        "bien à vous": "Bien à vous,",
+        "bonne journée": "Je vous souhaite une excellente journée.",
+    }
+    
+    def __init__(self, config_dir: Path):
+        self.config_dir = config_dir
+        self.snippets_file = config_dir / "snippets.json"
+        self.snippets = self._load_snippets()
+    
+    def _load_snippets(self) -> dict:
+        """Charge les snippets depuis le fichier."""
+        if self.snippets_file.exists():
+            try:
+                with open(self.snippets_file, 'r', encoding='utf-8') as f:
+                    custom = json.load(f)
+                    return {**self.DEFAULT_SNIPPETS, **custom}
+            except:
+                pass
+        return self.DEFAULT_SNIPPETS.copy()
+    
+    def save_snippets(self):
+        """Sauvegarde les snippets personnalisés."""
+        # Ne sauvegarder que les snippets custom (pas les defaults)
+        custom = {k: v for k, v in self.snippets.items() if k not in self.DEFAULT_SNIPPETS or self.snippets[k] != self.DEFAULT_SNIPPETS.get(k)}
+        with open(self.snippets_file, 'w', encoding='utf-8') as f:
+            json.dump(custom, f, ensure_ascii=False, indent=2)
+    
+    def add_snippet(self, trigger: str, content: str):
+        """Ajoute un snippet personnalisé."""
+        self.snippets[trigger.lower().strip()] = content
+        self.save_snippets()
+    
+    def process(self, text: str) -> tuple[str, str]:
+        """
+        Traite le texte et détecte commandes/snippets.
+        Retourne: (texte_final, type_action)
+        - type_action: "text" (normal), "command" (action exécutée), "snippet" (texte remplacé)
+        """
+        lower = text.lower().strip()
+        
+        # === COMMANDES GOOGLE ===
+        google_triggers = ["cherche sur google", "recherche sur google", "google", "cherche"]
+        for trigger in google_triggers:
+            if lower.startswith(trigger):
+                query = text[len(trigger):].strip()
+                # Nettoyer le query
+                for prefix in [":", " "]:
+                    query = query.lstrip(prefix)
+                if query:
+                    self._google_search(query)
+                    return (f"🔍 Recherche: {query}", "command")
+        
+        # === COMMANDES URL ===
+        if lower.startswith("ouvre ") and any(x in lower for x in [".com", ".fr", ".org", ".io", ".net"]):
+            url = text[6:].strip()
+            if not url.startswith("http"):
+                url = "https://" + url
+            webbrowser.open(url)
+            return (f"🌐 Ouvert: {url}", "command")
+        
+        # === SNIPPETS ===
+        for trigger, content in self.snippets.items():
+            if lower == trigger or lower == trigger + ".":
+                return (content, "snippet")
+        
+        # Texte normal
+        return (text, "text")
+    
+    def _google_search(self, query: str):
+        """Ouvre une recherche Google."""
+        import urllib.parse
+        url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+        webbrowser.open(url)
+        print(f"🔍 Google: {query}")
+
+
+# Instance globale des commandes vocales
+voice_commands: VoiceCommands = None
 
 
 class AudioRecorder:
@@ -127,8 +293,9 @@ class LocalStorage:
         self.save()
 
 
-# Instance globale
+# Instances globales
 storage = LocalStorage()
+voice_commands = VoiceCommands(storage.config_dir)
 
 
 # ============== FENÊTRE LEXIA STREAM (WEBVIEW) ==============
@@ -1103,6 +1270,7 @@ class Pill(QWidget):
         if self.recording or self.processing:
             return
         self.recording = True
+        SoundDesign.start_recording()  # Sound feedback
         self.rec.start()
         print("🎙️ Recording...")
     
@@ -1110,6 +1278,7 @@ class Pill(QWidget):
         if not self.recording:
             return
         self.recording = False
+        SoundDesign.stop_recording()  # Sound feedback
         self.processing = True
         path = self.rec.stop()
         
@@ -1134,6 +1303,7 @@ class Pill(QWidget):
             threading.Thread(target=self.transcribe, args=(path,), daemon=True).start()
         else:
             print("❌ Pas d'audio enregistré")
+            SoundDesign.error()  # Sound feedback
             self.processing = False
     
     def tick(self):
@@ -1293,44 +1463,61 @@ class Pill(QWidget):
                 if raw_text:
                     print(f"📝 Brut: {raw_text[:50]}...")
                     
-                    # 2. Reformatage intelligent avec SLM + Word Boost context
-                    try:
-                        boost_words = storage.get_word_boost()
-                        reformat_r = requests.post(
-                            f"{BACKEND_URL}/reformat",
-                            json={
-                                "text": raw_text,
-                                "word_boost_words": boost_words  # Envoie le contexte au LLM
-                            },
-                            timeout=30
-                        )
-                        if reformat_r.ok:
-                            result = reformat_r.json()
-                            self.text = result.get('formatted', raw_text)
-                            text_type = result.get('type', 'text')
-                            print(f"✨ Reformaté ({text_type}) avec {len(boost_words)} mots de contexte")
-                        else:
-                            self.text = raw_text
-                    except:
-                        self.text = raw_text
+                    # 2. Vérifier commandes vocales et snippets AVANT reformatage
+                    processed_text, action_type = voice_commands.process(raw_text)
                     
-                    # 3. Sauvegarder dans l'historique
+                    if action_type == "command":
+                        # Commande exécutée (Google, URL, etc.)
+                        print(f"🚀 Commande: {processed_text}")
+                        SoundDesign.command()
+                        self.text = ""
+                        self.processing = False
+                        return
+                    
+                    if action_type == "snippet":
+                        # Snippet détecté - taper directement le contenu
+                        self.text = processed_text
+                        print(f"📋 Snippet: {self.text[:30]}...")
+                        SoundDesign.command()
+                    else:
+                        # 3. Reformatage intelligent avec SLM (texte normal)
+                        try:
+                            reformat_r = requests.post(
+                                f"{BACKEND_URL}/reformat",
+                                json={"text": raw_text},
+                                timeout=30
+                            )
+                            if reformat_r.ok:
+                                result = reformat_r.json()
+                                self.text = result.get('formatted', raw_text)
+                                text_type = result.get('type', 'text')
+                                print(f"✨ Reformaté ({text_type})")
+                            else:
+                                self.text = raw_text
+                        except:
+                            self.text = raw_text
+                    
+                    # 4. Sauvegarder dans l'historique
                     storage.add_to_history(self.text)
                     
-                    # 4. Streaming typing - tape caractère par caractère très vite
-                    if kb_controller:
+                    # 5. Streaming typing - tape caractère par caractère très vite
+                    if kb_controller and self.text:
                         print(f"⌨️ Streaming: ", end="", flush=True)
                         for char in self.text:
                             kb_controller.type(char)
                             time.sleep(0.008)
                         print(f" ✅")
-                    elif PASTE_AVAILABLE:
+                        SoundDesign.success()
+                    elif PASTE_AVAILABLE and self.text:
                         pyperclip.copy(self.text)
                         print(f"✅ Copié: {self.text[:80]}...")
+                        SoundDesign.success()
                 else:
                     print("⚠️ Transcription vide")
+                    SoundDesign.error()
         except Exception as ex:
             print(f"❌ {ex}")
+            SoundDesign.error()
         self.processing = False
     
     def closeEvent(self, e):

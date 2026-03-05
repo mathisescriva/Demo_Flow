@@ -46,6 +46,7 @@ interface TicketMessageProps extends BaseMessageProps {
   reference: string
   gravite: number
   action: string
+  photo?: string
 }
 
 export type MessageProps =
@@ -110,7 +111,7 @@ export function Message(props: MessageProps) {
             <div className="mt-1 flex items-center gap-2 text-xs">
               <span className="flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-green-400" />
-                <span className="text-neutral-500">Word Boost</span>
+                <span className="text-neutral-500">Context Bias</span>
               </span>
             </div>
           )}
@@ -178,7 +179,7 @@ export function Message(props: MessageProps) {
   }
 
   if (type === "ticket") {
-    const { ticketId, objet, reference, gravite, action } = props as TicketMessageProps
+    const { ticketId, objet, reference, gravite, action, photo } = props as TicketMessageProps
     const config = getGraviteConfig(gravite)
     const Icon = config.icon
 
@@ -231,6 +232,12 @@ export function Message(props: MessageProps) {
           
           {/* Body */}
           <div className="px-4 py-4 space-y-3">
+            {/* Photo */}
+            {photo && (
+              <div className="rounded-lg overflow-hidden border border-white/10">
+                <img src={photo} alt="Photo équipement" className="w-full max-h-40 object-cover" />
+              </div>
+            )}
             {/* Reference */}
             {reference && (
               <div className="flex items-center gap-2 text-sm">

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Mic, Settings, PanelRightOpen, PanelRightClose } from 'lucide-react'
+import { Mic, Settings, PanelRightOpen, PanelRightClose, Camera, X, MessageSquare, Send } from 'lucide-react'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -30,6 +30,7 @@ interface SAPTicket {
   reference: string
   gravite: number
   action: string
+  photo?: string
   timestamp: Date
 }
 
@@ -54,11 +55,25 @@ function App() {
   const [sapTickets, setSapTickets] = useState<SAPTicket[]>([])
   const [notifications, setNotifications] = useState<Notification[]>([])
 
+  const [pendingPhoto, setPendingPhoto] = useState<string | null>(null)
+  const [textInputOpen, setTextInputOpen] = useState(false)
+  const [textInputValue, setTextInputValue] = useState('')
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   
   // Audio & TTS hooks
-  const { playStartRecording, playStopRecording, playSuccess } = useAudioFeedback()
+  const { 
+    playStartRecording, 
+    playStopRecording, 
+    playSuccess, 
+    playError,
+    playTranscribing,
+    playAnalyzing,
+    playNotification,
+    playMessage
+  } = useAudioFeedback()
   const { speakTicketCreated } = useTTS()
 
   useEffect(() => {
@@ -128,6 +143,7 @@ function App() {
       setSouverainete(0)
     } catch (error) {
       console.error('Erreur micro:', error)
+      playError() // Error sound for microphone access
       setVoiceState('error')
       setTimeout(() => setVoiceState('idle'), 2000)
     }
@@ -160,8 +176,81 @@ function App() {
     }, 5000)
   }
 
+  const handlePhotoCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      setPendingPhoto(reader.result as string)
+    }
+    reader.readAsDataURL(file)
+    e.target.value = ''
+  }
+
+  const handleTextSubmit = async () => {
+    const text = textInputValue.trim()
+    if (!text || isProcessing) return
+    setTextInputOpen(false)
+    setTextInputValue('')
+    setIsProcessing(true)
+    setSouverainete(50)
+    setStatus('analyzing')
+
+    playMessage()
+    addMessage({ type: 'user', content: text, timestamp: new Date() })
+
+    const analyzingMsgId = addMessage({
+      type: 'system',
+      content: 'Analyse par IA Mistral...',
+      status: 'processing',
+      timestamp: new Date()
+    })
+
+    try {
+      playAnalyzing()
+      const actionResponse = await fetch(`${API_URL}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+      if (!actionResponse.ok) throw new Error('Erreur analyse')
+      const actionData = await actionResponse.json()
+      setSouverainete(100)
+
+      if (actionData.data) {
+        const erpData: ERPData = actionData.data
+        const ticketId = `TKT-${Date.now().toString().slice(-6)}`
+        updateMessage(analyzingMsgId, { type: 'system', content: 'Ticket créé avec succès', status: 'success' })
+        addMessage({ type: 'ticket', ticketId, objet: erpData.objet, reference: erpData.reference_piece, gravite: erpData.gravite, action: erpData.action_requise, photo: pendingPhoto || undefined, timestamp: new Date() })
+        addMessage({ type: 'notification', title: 'Ticket enregistré', description: ticketId, variant: 'success', timestamp: new Date() })
+        playSuccess()
+        setTimeout(() => speakTicketCreated(erpData.objet, erpData.gravite), 500)
+        setSapTickets(prev => [{ id: ticketId, objet: erpData.objet, reference: erpData.reference_piece, gravite: erpData.gravite, action: erpData.action_requise, photo: pendingPhoto || undefined, timestamp: new Date() }, ...prev])
+        setPendingPhoto(null)
+        setTimeout(() => { playNotification(); addNotification('slack', 'Nouveau ticket', `${ticketId} - ${erpData.objet}`) }, 1000)
+        setTimeout(() => { playNotification(); addNotification('sap', 'Sync SAP', 'Notification créée dans SAP') }, 2000)
+        setStatus('complete')
+        setVoiceState('success')
+        setTimeout(() => { setVoiceState('idle'); setStatus('idle') }, 1500)
+      } else {
+        playError()
+        updateMessage(analyzingMsgId, { type: 'system', content: "Erreur lors de l'analyse", status: 'error' })
+        setVoiceState('error')
+        setTimeout(() => { setVoiceState('idle'); setStatus('idle') }, 2000)
+      }
+    } catch {
+      playError()
+      addMessage({ type: 'notification', title: 'Erreur de traitement', variant: 'error', timestamp: new Date() })
+      setVoiceState('error')
+      setTimeout(() => { setVoiceState('idle'); setStatus('idle') }, 2000)
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (textInputOpen) return
       if (e.code === 'Space' && !e.repeat && voiceState === 'idle') {
         e.preventDefault()
         handlePressStart()
@@ -169,6 +258,7 @@ function App() {
     }
 
     const handleKeyUp = (e: KeyboardEvent) => {
+      if (textInputOpen) return
       if (e.code === 'Space' && voiceState === 'recording') {
         e.preventDefault()
         handlePressEnd()
@@ -181,7 +271,7 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
     }
-  }, [voiceState])
+  }, [voiceState, textInputOpen])
 
   const processAudio = async (audioBlob: Blob) => {
     setIsProcessing(true)
@@ -197,6 +287,7 @@ function App() {
 
     try {
       setStatus('transcribing')
+      playTranscribing() // Sound feedback for transcription start
       const formData = new FormData()
       formData.append('audio', audioBlob, 'recording.webm')
 
@@ -220,6 +311,7 @@ function App() {
       })
 
       // Add user message with word-level confidence
+      playMessage() // Sound for user message
       const userMsgId = addMessage({
         type: 'user',
         content: transcribeData.text,
@@ -236,12 +328,13 @@ function App() {
       // Add analyzing notification
       const analyzingMsgId = addMessage({
         type: 'system',
-        content: 'Analyse par IA locale...',
+        content: 'Analyse par IA Mistral...',
         status: 'processing',
         timestamp: new Date()
       })
 
       setStatus('analyzing')
+      playAnalyzing() // Sound for AI analysis start
       const actionResponse = await fetch(`${API_URL}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -277,6 +370,7 @@ function App() {
           reference: finalReference,
           gravite: erpData.gravite,
           action: erpData.action_requise,
+          photo: pendingPhoto || undefined,
           timestamp: new Date()
         })
 
@@ -302,15 +396,19 @@ function App() {
           reference: finalReference,
           gravite: erpData.gravite,
           action: erpData.action_requise,
+          photo: pendingPhoto || undefined,
           timestamp: new Date()
         }
         setSapTickets(prev => [sapTicket, ...prev])
+        setPendingPhoto(null)
         
-        // 🔔 Send notifications
+        // 🔔 Send notifications with sounds
         setTimeout(() => {
+          playNotification()
           addNotification('slack', 'Nouveau ticket', `${ticketId} - ${finalObjet}`)
         }, 1000)
         setTimeout(() => {
+          playNotification()
           addNotification('sap', 'Sync SAP', `Notification créée dans SAP`)
         }, 2000)
 
@@ -321,6 +419,7 @@ function App() {
           setStatus('idle')
         }, 1500)
       } else {
+        playError() // Error sound
         updateMessage(analyzingMsgId, {
           type: 'system',
           content: 'Erreur lors de l\'analyse',
@@ -334,6 +433,7 @@ function App() {
       }
     } catch (error) {
       console.error('Erreur:', error)
+      playError() // Error sound
       addMessage({
         type: 'notification',
         title: 'Erreur de traitement',
@@ -407,6 +507,9 @@ function App() {
               </svg>
               <span className="text-[10px] text-neutral-400 font-medium">Souverain</span>
             </div>
+            <div className="flex items-center gap-1.5 bg-neutral-800 px-2 py-1 rounded-full">
+              <span className="text-[10px] text-neutral-400 font-medium">SAP · Sage · Salesforce</span>
+            </div>
           </div>
         </div>
       </header>
@@ -454,18 +557,91 @@ function App() {
             </div>
           )}
 
-          {/* Voice Button - Push to Talk */}
-          <VoiceButton
-            label="Maintenez pour parler"
-            trailing="Space"
-            state={voiceState}
-            onPressStart={handlePressStart}
-            onPressEnd={handlePressEnd}
-            pushToTalk={true}
-            variant="outline"
-            size="lg"
-            className="w-full"
+          {/* Photo preview */}
+          {pendingPhoto && (
+            <div className="flex items-center gap-2 p-2 rounded-lg bg-neutral-900 border border-neutral-800">
+              <img src={pendingPhoto} alt="Photo jointe" className="h-12 w-12 rounded-md object-cover" />
+              <span className="text-xs text-neutral-400 flex-1">Photo jointe au prochain ticket</span>
+              <button onClick={() => setPendingPhoto(null)} className="p-1 rounded hover:bg-neutral-800 text-neutral-500 hover:text-white transition-colors">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
+          {/* Text input */}
+          {textInputOpen && (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={textInputValue}
+                onChange={(e) => setTextInputValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleTextSubmit() }}
+                placeholder="Décrivez le problème..."
+                autoFocus
+                className="flex-1 h-10 rounded-lg bg-neutral-900 border border-neutral-700 px-3 text-sm text-white placeholder:text-neutral-500 focus:outline-none focus:border-neutral-500"
+              />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={handleTextSubmit}
+                disabled={!textInputValue.trim()}
+                className="h-10 w-10 flex-shrink-0 border-neutral-700 text-neutral-400 hover:text-white hover:border-neutral-500 disabled:opacity-30"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => { setTextInputOpen(false); setTextInputValue('') }}
+                className="h-10 w-10 flex-shrink-0 border-neutral-700 text-neutral-500 hover:text-white hover:border-neutral-500"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
+
+          {/* Voice Button + Camera + Text */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={handlePhotoCapture}
+            className="hidden"
           />
+          {!textInputOpen && (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => fileInputRef.current?.click()}
+                className="h-12 w-12 flex-shrink-0 border-neutral-700 text-neutral-400 hover:text-white hover:border-neutral-500"
+                title="Ajouter une photo"
+              >
+                <Camera className="h-5 w-5" />
+              </Button>
+              <VoiceButton
+                label="Maintenez pour parler"
+                trailing="Space"
+                state={voiceState}
+                onPressStart={handlePressStart}
+                onPressEnd={handlePressEnd}
+                pushToTalk={true}
+                variant="outline"
+                size="lg"
+                className="flex-1"
+              />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => setTextInputOpen(true)}
+                className="h-12 w-12 flex-shrink-0 border-neutral-700 text-neutral-400 hover:text-white hover:border-neutral-500"
+                title="Saisie texte"
+              >
+                <MessageSquare className="h-5 w-5" />
+              </Button>
+            </div>
+          )}
         </div>
       </footer>
     </div>
