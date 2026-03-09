@@ -5,7 +5,8 @@ Démonstration End-to-End : Transcription + Intelligence via Mistral API
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import tempfile
 import os
 from typing import Optional, List
@@ -84,6 +85,14 @@ custom_vocabulary: List[str] = []
 # ============== DASHBOARD DATA ==============
 dashboard_tickets: List[dict] = []
 dashboard_logs: deque = deque(maxlen=100)
+
+# ============== WORKFLOW PIPELINE STATE ==============
+pipeline_status = {
+    "step": "idle",
+    "text": "",
+    "ticket": None,
+    "timestamp": None,
+}
 
 def add_log(level: str, source: str, message: str):
     """Ajoute un log au dashboard."""
@@ -519,6 +528,277 @@ async def clear_dashboard():
     add_log("INFO", "SYSTEM", "Dashboard réinitialisé")
     return {"success": True}
 
+# ============== WORKFLOW PIPELINE ==============
+
+WORKFLOW_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lexia — Workflow</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#f8f9fb; color:#1a1a2e; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+
+.header { padding:18px 32px; display:flex; align-items:center; justify-content:space-between; background:#fff; border-bottom:1px solid #e5e7eb; }
+.header-left { display:flex; align-items:center; gap:14px; }
+.header-left img { height:24px; }
+.header-pipe { width:1px; height:20px; background:#e5e7eb; }
+.header-title { font-size:14px; color:#6b7280; font-weight:500; letter-spacing:-.2px; }
+.live-badge { display:flex; align-items:center; gap:6px; background:#ecfdf5; border:1px solid #a7f3d0; padding:4px 12px; border-radius:20px; }
+.live-dot { width:7px; height:7px; border-radius:50%; background:#22c55e; animation:livePulse 2s infinite; }
+.live-text { font-size:11px; color:#16a34a; font-weight:600; }
+@keyframes livePulse { 0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,.4)} 50%{box-shadow:0 0 0 5px rgba(34,197,94,0)} }
+
+.canvas { flex:1; display:flex; align-items:center; justify-content:center; position:relative; padding:40px; }
+.canvas::before { content:''; position:absolute; inset:0; background-image:radial-gradient(circle,#d1d5db 1px,transparent 1px); background-size:28px 28px; opacity:.35; }
+
+.workflow { display:flex; align-items:center; gap:0; position:relative; z-index:1; }
+
+/* Nodes */
+.node { width:220px; background:#fff; border:1.5px solid #e5e7eb; border-radius:16px; overflow:hidden; transition:all .5s cubic-bezier(.4,0,.2,1); position:relative; flex-shrink:0; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+.node.active { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.1), 0 8px 25px rgba(37,99,235,.08); transform:scale(1.03); }
+.node.active .node-status { color:#2563eb; }
+.node.complete { border-color:#16a34a; box-shadow:0 0 0 3px rgba(22,163,74,.08); }
+.node.complete .node-status { color:#16a34a; }
+.node.complete .node-icon { background:#f0fdf4; }
+
+.node-header { padding:16px 16px 12px; display:flex; align-items:center; gap:12px; }
+.node-icon { width:44px; height:44px; border-radius:12px; background:#f3f4f6; display:flex; align-items:center; justify-content:center; transition:all .5s; flex-shrink:0; }
+.node-icon img { width:26px; height:26px; object-fit:contain; }
+.node-icon svg { width:22px; height:22px; color:#6b7280; transition:color .5s; }
+.node.active .node-icon { background:#eff6ff; }
+.node.active .node-icon svg { color:#2563eb; }
+.node.complete .node-icon svg { color:#16a34a; }
+.node-info { flex:1; min-width:0; }
+.node-title { font-size:13px; font-weight:700; color:#111827; letter-spacing:-.2px; }
+.node-subtitle { font-size:11px; color:#9ca3af; margin-top:1px; }
+.node-status { font-size:10px; color:#9ca3af; margin-top:3px; font-weight:600; text-transform:uppercase; letter-spacing:.3px; transition:color .5s; }
+
+.node-body { padding:0 16px 14px; display:none; }
+.node.active .node-body, .node.complete .node-body { display:block; animation:fadeIn .3s; }
+@keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+.node-data { background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:10px 12px; font-size:11px; color:#6b7280; line-height:1.6; max-height:80px; overflow:hidden; }
+.node-data .label { color:#9ca3af; font-size:9px; text-transform:uppercase; letter-spacing:.5px; font-weight:600; }
+.node-data .value { color:#1f2937; font-weight:500; margin-top:2px; }
+
+/* Processing bar */
+.node.active::before { content:''; position:absolute; top:0; left:0; right:0; height:3px; border-radius:16px 16px 0 0; background:linear-gradient(90deg,transparent,#2563eb,transparent); animation:processingBar 1.8s infinite; }
+@keyframes processingBar { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
+
+/* Connectors */
+.connector { width:56px; height:3px; position:relative; flex-shrink:0; }
+.connector-line { position:absolute; top:0; left:0; right:0; height:3px; background:#e5e7eb; border-radius:2px; }
+.connector-flow { position:absolute; top:-3px; left:0; width:9px; height:9px; border-radius:50%; background:#2563eb; opacity:0; box-shadow:0 0 8px rgba(37,99,235,.4); }
+.connector.active .connector-flow { opacity:1; animation:flowDot .9s infinite linear; }
+.connector.complete .connector-line { background:#86efac; }
+.connector.complete .connector-flow { opacity:0; }
+@keyframes flowDot { 0%{left:0} 100%{left:calc(100% - 9px)} }
+
+/* Ticket notification */
+.notif-ticket { display:flex; align-items:center; gap:8px; padding:8px 10px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px; }
+.notif-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.sev-1,.sev-2 { background:#22c55e; } .sev-3 { background:#eab308; } .sev-4 { background:#f97316; } .sev-5 { background:#ef4444; }
+.notif-text { font-size:11px; color:#111827; font-weight:600; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.notif-id { font-size:9px; color:#6b7280; font-family:monospace; font-weight:600; flex-shrink:0; }
+
+/* Footer */
+.footer { padding:14px 32px; background:#fff; border-top:1px solid #e5e7eb; display:flex; align-items:center; justify-content:space-between; }
+.footer-info { font-size:11px; color:#9ca3af; }
+.footer-badges { display:flex; gap:8px; }
+.fbadge { font-size:10px; padding:3px 10px; border-radius:20px; font-weight:500; }
+.fbadge-green { color:#16a34a; background:#f0fdf4; border:1px solid #bbf7d0; }
+.fbadge-blue { color:#2563eb; background:#eff6ff; border:1px solid #bfdbfe; }
+
+@media(max-width:960px) { .workflow { flex-direction:column; } .connector { width:3px; height:36px; } .connector-line { width:3px; height:100%; top:0; left:50%; transform:translateX(-50%); } @keyframes flowDot { 0%{top:0} 100%{top:calc(100% - 9px)} } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-left">
+    <img src="/logo_lexia.webp" alt="Lexia" />
+    <div class="header-pipe"></div>
+    <span class="header-title">Workflow Engine</span>
+  </div>
+  <div class="live-badge"><div class="live-dot"></div><span class="live-text">LIVE</span></div>
+</div>
+
+<div class="canvas">
+  <div class="workflow">
+    <!-- Node 1: Voice Input -->
+    <div class="node" id="n-voice">
+      <div class="node-header">
+        <div class="node-icon">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/></svg>
+        </div>
+        <div class="node-info">
+          <div class="node-title">Capture Audio</div>
+          <div class="node-subtitle">Input vocal</div>
+          <div class="node-status" id="s-voice">En attente</div>
+        </div>
+      </div>
+      <div class="node-body"><div class="node-data"><div class="label">Signal</div><div class="value" id="d-voice">—</div></div></div>
+    </div>
+
+    <div class="connector" id="c1"><div class="connector-line"></div><div class="connector-flow"></div></div>
+
+    <!-- Node 2: Lexia STT -->
+    <div class="node" id="n-stt">
+      <div class="node-header">
+        <div class="node-icon"><img src="/logo_lexia_icone.webp" alt="Lexia" /></div>
+        <div class="node-info">
+          <div class="node-title">Lexia Transcribe</div>
+          <div class="node-subtitle">Speech-to-Text</div>
+          <div class="node-status" id="s-stt">En attente</div>
+        </div>
+      </div>
+      <div class="node-body"><div class="node-data"><div class="label">Transcription</div><div class="value" id="d-stt">—</div></div></div>
+    </div>
+
+    <div class="connector" id="c2"><div class="connector-line"></div><div class="connector-flow"></div></div>
+
+    <!-- Node 3: Lexia AI -->
+    <div class="node" id="n-ai">
+      <div class="node-header">
+        <div class="node-icon"><img src="/logo_lexia_icone.webp" alt="Lexia" /></div>
+        <div class="node-info">
+          <div class="node-title">Lexia Intelligence</div>
+          <div class="node-subtitle">Extraction structurée</div>
+          <div class="node-status" id="s-ai">En attente</div>
+        </div>
+      </div>
+      <div class="node-body"><div class="node-data"><div class="label">Analyse</div><div class="value" id="d-ai">—</div></div></div>
+    </div>
+
+    <div class="connector" id="c3"><div class="connector-line"></div><div class="connector-flow"></div></div>
+
+    <!-- Node 4: ERP -->
+    <div class="node" id="n-erp">
+      <div class="node-header">
+        <div class="node-icon">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>
+        </div>
+        <div class="node-info">
+          <div class="node-title">Système d'Information</div>
+          <div class="node-subtitle">SAP · Sage · Salesforce</div>
+          <div class="node-status" id="s-erp">En attente</div>
+        </div>
+      </div>
+      <div class="node-body"><div class="node-data" id="d-erp">—</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <div class="footer-info">Lexia Workflow Engine</div>
+  <div class="footer-badges">
+    <span class="fbadge fbadge-green">Connecté</span>
+    <span class="fbadge fbadge-blue">Temps réel</span>
+  </div>
+</div>
+
+<script>
+let prevStep = 'idle';
+function resetAll() {
+  ['n-voice','n-stt','n-ai','n-erp'].forEach(id => { document.getElementById(id).className = 'node'; });
+  ['c1','c2','c3'].forEach(id => { document.getElementById(id).className = 'connector'; });
+  ['s-voice','s-stt','s-ai','s-erp'].forEach(id => { document.getElementById(id).textContent = 'En attente'; });
+  document.getElementById('d-voice').textContent = '—';
+  document.getElementById('d-stt').textContent = '—';
+  document.getElementById('d-ai').textContent = '—';
+  document.getElementById('d-erp').innerHTML = '—';
+}
+function txt(s, max) { return s && s.length > max ? s.substring(0, max) + '...' : (s || '—'); }
+function applyState(data) {
+  const step = data.step;
+  if (step === 'idle' && prevStep !== 'idle') { setTimeout(resetAll, 3000); prevStep = step; return; }
+  prevStep = step;
+
+  if (step === 'recording') {
+    resetAll();
+    document.getElementById('n-voice').className = 'node active';
+    document.getElementById('s-voice').textContent = 'Enregistrement...';
+    document.getElementById('d-voice').textContent = 'Capture du signal audio';
+  }
+  if (step === 'transcribing') {
+    document.getElementById('n-voice').className = 'node complete';
+    document.getElementById('s-voice').textContent = 'Terminé';
+    document.getElementById('d-voice').textContent = 'Audio capturé';
+    document.getElementById('c1').className = 'connector active';
+    document.getElementById('n-stt').className = 'node active';
+    document.getElementById('s-stt').textContent = 'Processing...';
+    document.getElementById('d-stt').textContent = 'Analyse du signal audio...';
+  }
+  if (step === 'transcribed') {
+    document.getElementById('n-voice').className = 'node complete';
+    document.getElementById('s-voice').textContent = 'Terminé';
+    document.getElementById('c1').className = 'connector complete';
+    document.getElementById('n-stt').className = 'node complete';
+    document.getElementById('s-stt').textContent = 'Terminé';
+    document.getElementById('d-stt').textContent = txt(data.text, 55);
+  }
+  if (step === 'analyzing') {
+    document.getElementById('n-voice').className = 'node complete';
+    document.getElementById('s-voice').textContent = 'Terminé';
+    document.getElementById('c1').className = 'connector complete';
+    document.getElementById('n-stt').className = 'node complete';
+    document.getElementById('s-stt').textContent = 'Terminé';
+    document.getElementById('d-stt').textContent = txt(data.text, 55);
+    document.getElementById('c2').className = 'connector active';
+    document.getElementById('n-ai').className = 'node active';
+    document.getElementById('s-ai').textContent = 'Processing...';
+    document.getElementById('d-ai').textContent = 'Structuration des données...';
+  }
+  if (step === 'complete') {
+    document.getElementById('n-voice').className = 'node complete';
+    document.getElementById('s-voice').textContent = 'Terminé';
+    document.getElementById('c1').className = 'connector complete';
+    document.getElementById('n-stt').className = 'node complete';
+    document.getElementById('s-stt').textContent = 'Terminé';
+    document.getElementById('d-stt').textContent = txt(data.text, 55);
+    document.getElementById('c2').className = 'connector complete';
+    document.getElementById('n-ai').className = 'node complete';
+    document.getElementById('s-ai').textContent = 'Terminé';
+    document.getElementById('d-ai').textContent = 'Données extraites';
+    document.getElementById('c3').className = 'connector active';
+    document.getElementById('n-erp').className = 'node active';
+    document.getElementById('s-erp').textContent = 'Envoi...';
+    setTimeout(() => {
+      document.getElementById('c3').className = 'connector complete';
+      document.getElementById('n-erp').className = 'node complete';
+      document.getElementById('s-erp').textContent = 'Créé';
+      const t = data.ticket;
+      if (t) {
+        const sev = t.gravite || 3;
+        document.getElementById('d-erp').innerHTML = '<div class="notif-ticket"><span class="notif-dot sev-'+sev+'"></span><span class="notif-text">'+(t.objet||'—')+'</span><span class="notif-id">'+(t.id||'TKT-000')+'</span></div>';
+      }
+    }, 800);
+  }
+}
+async function poll() { try { const r = await fetch('/workflow/status'); applyState(await r.json()); } catch(e){} }
+setInterval(poll, 400);
+poll();
+</script>
+</body>
+</html>"""
+
+@app.post("/workflow/update")
+async def update_workflow(data: dict):
+    """Met à jour l'état du pipeline pour la page workflow."""
+    pipeline_status["step"] = data.get("step", "idle")
+    pipeline_status["text"] = data.get("text", "")
+    pipeline_status["ticket"] = data.get("ticket", None)
+    pipeline_status["timestamp"] = datetime.now().strftime("%H:%M:%S")
+    return {"success": True}
+
+@app.get("/workflow/status")
+async def get_workflow_status():
+    return pipeline_status
+
+@app.get("/workflow", response_class=HTMLResponse)
+async def workflow_page():
+    return WORKFLOW_HTML
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page():
     return """<!DOCTYPE html>
@@ -872,6 +1152,20 @@ async def showcase_logo():
         with open(logo_path, 'rb') as f:
             return Response(content=f.read(), media_type="image/webp")
     return Response(content=b"", media_type="image/webp")
+
+@app.get("/logo_lexia.webp")
+async def serve_logo_main():
+    logo_path = os.path.join(os.path.dirname(__file__), '..', 'logo_lexia.webp')
+    if os.path.exists(logo_path):
+        return FileResponse(logo_path, media_type="image/webp")
+    return HTMLResponse("", status_code=404)
+
+@app.get("/logo_lexia_icone.webp")
+async def serve_logo_icone():
+    logo_path = os.path.join(os.path.dirname(__file__), '..', 'whisper-flow', 'logo_lexia_icone.webp')
+    if os.path.exists(logo_path):
+        return FileResponse(logo_path, media_type="image/webp")
+    return HTMLResponse("", status_code=404)
 
 @app.get("/showcase", response_class=HTMLResponse)
 async def showcase_page():

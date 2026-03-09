@@ -104,6 +104,14 @@ function App() {
 
   const streamRef = useRef<MediaStream | null>(null)
 
+  const updateWorkflow = (step: string, text?: string, ticket?: Record<string, unknown>) => {
+    fetch(`${API_URL}/workflow/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ step, text: text || '', ticket: ticket || null }),
+    }).catch(() => {})
+  }
+
   const handlePressStart = async () => {
     if (voiceState !== 'idle') return
     
@@ -141,6 +149,7 @@ function App() {
       setVoiceState('recording')
       setStatus('listening')
       setSouverainete(0)
+      updateWorkflow('recording')
     } catch (error) {
       console.error('Erreur micro:', error)
       playError() // Error sound for microphone access
@@ -195,6 +204,7 @@ function App() {
     setIsProcessing(true)
     setSouverainete(50)
     setStatus('analyzing')
+    updateWorkflow('analyzing', text)
 
     playMessage()
     addMessage({ type: 'user', content: text, timestamp: new Date() })
@@ -230,8 +240,9 @@ function App() {
         setTimeout(() => { playNotification(); addNotification('slack', 'Nouveau ticket', `${ticketId} - ${erpData.objet}`) }, 1000)
         setTimeout(() => { playNotification(); addNotification('sap', 'Sync SAP', 'Notification créée dans SAP') }, 2000)
         setStatus('complete')
+        updateWorkflow('complete', text, { id: ticketId, objet: erpData.objet, gravite: erpData.gravite })
         setVoiceState('success')
-        setTimeout(() => { setVoiceState('idle'); setStatus('idle') }, 1500)
+        setTimeout(() => { setVoiceState('idle'); setStatus('idle'); updateWorkflow('idle') }, 1500)
       } else {
         playError()
         updateMessage(analyzingMsgId, { type: 'system', content: "Erreur lors de l'analyse", status: 'error' })
@@ -287,7 +298,8 @@ function App() {
 
     try {
       setStatus('transcribing')
-      playTranscribing() // Sound feedback for transcription start
+      updateWorkflow('transcribing')
+      playTranscribing()
       const formData = new FormData()
       formData.append('audio', audioBlob, 'recording.webm')
 
@@ -302,6 +314,7 @@ function App() {
 
       const transcribeData = await transcribeResponse.json()
       setSouverainete(50)
+      updateWorkflow('transcribed', transcribeData.text)
 
       // Update processing message and add user message
       updateMessage(processingMsgId, {
@@ -334,7 +347,8 @@ function App() {
       })
 
       setStatus('analyzing')
-      playAnalyzing() // Sound for AI analysis start
+      updateWorkflow('analyzing', transcribeData.text)
+      playAnalyzing()
       const actionResponse = await fetch(`${API_URL}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -413,10 +427,12 @@ function App() {
         }, 2000)
 
         setStatus('complete')
+        updateWorkflow('complete', transcribeData.text, { id: ticketId, objet: finalObjet, gravite: erpData.gravite })
         setVoiceState('success')
         setTimeout(() => {
           setVoiceState('idle')
           setStatus('idle')
+          updateWorkflow('idle')
         }, 1500)
       } else {
         playError() // Error sound
